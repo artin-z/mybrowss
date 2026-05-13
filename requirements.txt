@@ -1,0 +1,5 @@
+python-telegram-bot
+playwright
+pillow
+fastapi
+uvicorn

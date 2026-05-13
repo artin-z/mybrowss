@@ -1,0 +1,358 @@
+import asyncio
+import io
+import re
+import os
+import urllib.request
+from PIL import Image, ImageDraw
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+    Application
+)
+from playwright.async_api import async_playwright
+
+# --- اضافه‌شده برای وب‌سرور ---
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
+import uvicorn
+
+# --- تنظیمات اولیه ---
+TOKEN = os.environ.get("BOT_TOKEN", "478454887:O-jcRMDoEF6QtaKObV5IVLOKc8asaY3ceys")
+BALE_BASE_URL = "https://tapi.bale.ai/bot"
+
+# --- تنظیمات ادمین ---
+ADMIN_ID = 1826980748
+NOT_ADMIN_TEXT = "بیلاخ داداش ادمین نیستی! ادمین: @unknow_user2"
+
+user_sessions = {}
+
+if not os.path.exists("videos"):
+    os.makedirs("videos")
+
+# --- توابع کمکی ---
+
+def main_keyboard(is_mobile=False):
+    device_btn = "📱 موبایل" if not is_mobile else "💻 دسکتاپ"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⬆️ بالا", callback_data="scroll_up"),
+            InlineKeyboardButton("🔄 رفرش", callback_data="refresh"),
+            InlineKeyboardButton("⬇️ پایین", callback_data="scroll_down")
+        ],
+        [
+            InlineKeyboardButton("🎯 کلیک هوشمند", callback_data="smart_click"),
+            InlineKeyboardButton("📍 کلیک مختصات", callback_data="coord_click")
+        ],
+        [
+            InlineKeyboardButton("⌨️ تایپ با مختصات", callback_data="type"),
+            InlineKeyboardButton("📹 رکورد ویدیو", callback_data="record_video")
+        ],
+        [
+            InlineKeyboardButton("🔲 اسکرین کامل", callback_data="full_screenshot"),
+            InlineKeyboardButton("📄 خروجی PDF", callback_data="pdf")
+        ],
+        [
+            InlineKeyboardButton("📥 استخراج متن", callback_data="scrape"),
+            InlineKeyboardButton("💾 بایگانی", callback_data="wayback")
+        ],
+        [
+            InlineKeyboardButton(device_btn, callback_data="toggle_device"),
+            InlineKeyboardButton("❌ بستن", callback_data="close")
+        ]
+    ])
+
+def draw_grid_on_image(image_bytes, step=100):
+    image = Image.open(io.BytesIO(image_bytes))
+    if image.mode in ("RGBA", "P"):
+        image = image.convert("RGB")
+        
+    draw = ImageDraw.Draw(image)
+    width, height = image.size
+    
+    for x in range(0, width, step):
+        draw.line([(x, 0), (x, height)], fill="red", width=1)
+        draw.text((x + 2, 5), str(x), fill="red")
+        
+    for y in range(0, height, step):
+        draw.line([(0, y), (width, y)], fill="red", width=1)
+        if y != 0:
+            draw.text((5, y + 2), str(y), fill="red")
+            
+    output = io.BytesIO()
+    image.save(output, format="JPEG", quality=85)
+    return output.getvalue()
+
+SMART_CLICK_JS = """
+() => {
+    let count = 0;
+    window.__smart_elements = {};
+    let selector = 'a, button, input, textarea, select, [role="button"], [role="textbox"], [contenteditable="true"]';
+    
+    document.querySelectorAll(selector).forEach(el => {
+        let rect = el.getBoundingClientRect();
+        if(rect.width === 0 || rect.height === 0 || el.style.visibility === 'hidden' || el.style.display === 'none') return;
+        
+        count++;
+        el.style.border = '2px solid red';
+        let label = document.createElement('div');
+        label.innerText = count;
+        label.style.position = 'absolute';
+        label.style.left = (rect.left + window.scrollX) + 'px';
+        label.style.top = (rect.top + window.scrollY) + 'px';
+        label.style.background = 'yellow';
+        label.style.color = 'black';
+        label.style.fontWeight = 'bold';
+        label.style.zIndex = 10000;
+        label.style.padding = '2px';
+        label.style.fontSize = '14px';
+        document.body.appendChild(label);
+        
+        window.__smart_elements[count] = {x: rect.left + rect.width/2, y: rect.top + rect.height/2};
+    });
+    return window.__smart_elements;
+}
+"""
+
+async def send_current_view(query_or_message, session, caption="✅ وضعیت صفحه:"):
+    screenshot_bytes = await session["page"].screenshot(full_page=False)
+    markup = main_keyboard(session["is_mobile"])
+    
+    if hasattr(query_or_message, 'message') and query_or_message.message is not None:
+        await query_or_message.message.reply_photo(photo=screenshot_bytes, caption=caption, reply_markup=markup)
+    else:
+        await query_or_message.reply_photo(photo=screenshot_bytes, caption=caption, reply_markup=markup)
+
+# --- هندلرهای تلگرام/بله ---
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 خوش آمدید! لینک سایت مورد نظر را بفرستید.")
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    if re.match(r'^https?://', text):
+        await load_url(update.message, context.bot_data['pw'], context.bot_data['browser'], text, user_id)
+    elif user_id in user_sessions and user_sessions[user_id].get("expected_action"):
+        await handle_action_input(update, context)
+    else:
+        await update.message.reply_text("⚠️ یک لینک معتبر بفرستید.")
+
+async def load_url(message, pw, browser, url, user_id, is_mobile=False):
+    processing_msg = await message.reply_text("⏳ در حال بارگذاری...")
+    try:
+        if user_id in user_sessions and "browser_context" in user_sessions[user_id]:
+            await user_sessions[user_id]["browser_context"].close()
+
+        context_options = {"viewport": {"width": 1280, "height": 720}}
+        if is_mobile:
+            context_options = pw.devices['iPhone 13']
+
+        new_context = await browser.new_context(**context_options)
+        page = await new_context.new_page()
+        await page.goto(url, timeout=60000, wait_until="networkidle")
+
+        user_sessions[user_id] = {
+            "browser_context": new_context,
+            "page": page,
+            "url": url,
+            "is_mobile": is_mobile,
+            "expected_action": None,
+            "smart_elements": {}
+        }
+        await send_current_view(message, user_sessions[user_id], f"✅ لود شد:\n🔗 {url}")
+        await processing_msg.delete()
+    except Exception as e:
+        await processing_msg.edit_text(f"❌ خطا: {e}")
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    await query.answer()
+
+    if user_id not in user_sessions:
+        await query.message.reply_text("⚠️ صفحه فعالی ندارید.")
+        return
+
+    action = query.data
+    session = user_sessions[user_id]
+    page = session["page"]
+
+    try:
+        if action == "scroll_up":
+            await page.evaluate("window.scrollBy(0, -600)")
+            await send_current_view(query, session, "⬆️ اسکرول بالا")
+
+        elif action == "scroll_down":
+            await page.evaluate("window.scrollBy(0, 600)")
+            await send_current_view(query, session, "⬇️ اسکرول پایین")
+
+        elif action == "refresh":
+            await page.reload(wait_until="networkidle")
+            await send_current_view(query, session, "🔄 رفرش شد")
+
+        elif action == "full_screenshot":
+            msg = await query.message.reply_text("⏳ گرفتن اسکرین‌شات...")
+            full_pic = await page.screenshot(full_page=True)
+            await query.message.reply_document(document=full_pic, filename="full.jpg")
+            await msg.delete()
+
+        elif action == "pdf":
+            msg = await query.message.reply_text("⏳ تولید PDF...")
+            pdf_bytes = await page.pdf(format="A4")
+            await query.message.reply_document(document=pdf_bytes, filename="page.pdf")
+            await msg.delete()
+
+        elif action == "smart_click":
+            elements = await page.evaluate(SMART_CLICK_JS)
+            session["smart_elements"] = elements
+            session["expected_action"] = "smart_click"
+            pic = await page.screenshot(full_page=False)
+            await query.message.reply_photo(photo=pic, caption="🎯 شماره المان را بفرستید:")
+
+        elif action == "coord_click":
+            session["expected_action"] = "coord_click"
+            screenshot_bytes = await page.screenshot(full_page=False)
+            grid_image = draw_grid_on_image(screenshot_bytes)
+            await query.message.reply_photo(photo=grid_image, caption="📍 مختصات X Y را با فاصله بفرستید (مثال: 400 150)")
+
+        elif action == "type":
+            session["expected_action"] = "coord_type"
+            screenshot_bytes = await page.screenshot(full_page=False)
+            grid_image = draw_grid_on_image(screenshot_bytes)
+            await query.message.reply_photo(photo=grid_image, caption="⌨️ مختصات و متن را بفرستید (مثال: 400 150 سلام)")
+
+        elif action == "record_video":
+            session["expected_action"] = "record_video"
+            await query.message.reply_text("📹 زمان ویدیو (۵ تا ۶۰ ثانیه) را بفرستید:")
+
+        elif action == "scrape":
+            text_content = await page.evaluate("document.body.innerText")
+            await query.message.reply_text(f"📄 متن:\n\n{text_content[:4000]}")
+
+        elif action == "toggle_device":
+            is_mob = not session["is_mobile"]
+            await load_url(query.message, context.bot_data['pw'], context.bot_data['browser'], session["url"], user_id, is_mobile=is_mob)
+
+        elif action == "close":
+            await session["browser_context"].close()
+            del user_sessions[user_id]
+            await query.edit_message_caption(caption="❌ بسته شد.")
+
+    except Exception as e:
+        await query.message.reply_text(f"❌ خطا: {e}")
+
+async def handle_action_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    session = user_sessions[user_id]
+    action = session["expected_action"]
+    text = update.message.text
+    page = session["page"]
+
+    try:
+        if action == "smart_click":
+            element_id = text.strip()
+            elements = session.get("smart_elements", {})
+            if str(element_id) in elements:
+                await page.mouse.click(float(elements[element_id]['x']), float(elements[element_id]['y']))
+                await asyncio.sleep(2)
+                session["expected_action"] = None
+                await send_current_view(update, session, "✅ کلیک انجام شد.")
+            else:
+                await update.message.reply_text("❌ شماره نامعتبر.")
+
+        elif action == "coord_click":
+            parts = text.split()
+            x, y = float(parts[0]), float(parts[1])
+            await page.mouse.click(x, y)
+            await asyncio.sleep(2)
+            session["expected_action"] = None
+            await send_current_view(update, session, f"✅ کلیک در {x},{y}")
+
+        elif action == "coord_type":
+            parts = text.split(" ", 2)
+            x, y, val = float(parts[0]), float(parts[1]), parts[2]
+            await page.mouse.click(x, y)
+            await asyncio.sleep(0.5)
+            await page.keyboard.type(val, delay=50)
+            await asyncio.sleep(1)
+            session["expected_action"] = None
+            await send_current_view(update, session, "✅ تایپ شد.")
+
+        elif action == "record_video":
+            duration = int(text.strip())
+            session["expected_action"] = None
+            msg = await update.message.reply_text(f"🎥 ضبط {duration} ثانیه...")
+            pw, browser = context.bot_data['pw'], context.bot_data['browser']
+            vid_context = await browser.new_context(record_video_dir="videos/")
+            vid_page = await vid_context.new_page()
+            await vid_page.goto(session["url"])
+            await asyncio.sleep(duration)
+            await vid_context.close()
+            video_path = await vid_page.video.path()
+            with open(video_path, 'rb') as f:
+                await update.message.reply_video(video=f)
+            os.remove(video_path)
+            await msg.delete()
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا: {e}")
+        session["expected_action"] = None
+
+
+# --- اجرای هماهنگ سرور و ربات با Lifespan ---
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("Initializing Playwright and Bot...")
+    
+    application = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .base_url(BALE_BASE_URL)
+        .connect_timeout(60.0)
+        .read_timeout(60.0)
+        .write_timeout(60.0)
+        .pool_timeout(60.0)
+        .build()
+    )
+
+    application.bot_data['pw'] = await async_playwright().start()
+    application.bot_data['browser'] = await application.bot_data['pw'].chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-setuid-sandbox"]
+    )
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT, handle_text))
+    application.add_handler(CallbackQueryHandler(button_callback))
+
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(drop_pending_updates=True)
+    
+    print("--- Bot is fully Online! ---")
+    
+    yield  
+    
+    print("Shutting down...")
+    await application.updater.stop()
+    await application.stop()
+    await application.bot_data['browser'].close()
+    await application.bot_data['pw'].stop()
+
+# --- ساخت اپلیکیشن FastAPI ---
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/")
+def read_root():
+    return {"status": "active", "bot": "running"}
+
+if __name__ == '__main__':
+    uvicorn.run(app, host="0.0.0.0", port=7860)

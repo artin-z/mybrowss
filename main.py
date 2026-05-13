@@ -2,7 +2,7 @@ import asyncio
 import io
 import re
 import os
-import urllib.request
+from io import BytesIO
 from PIL import Image, ImageDraw
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import (
@@ -16,18 +16,14 @@ from telegram.ext import (
 )
 from playwright.async_api import async_playwright
 
-# --- اضافه‌شده برای وب‌سرور ---
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 import uvicorn
-
-from io import BytesIO
 
 # --- تنظیمات اولیه ---
 TOKEN = os.environ.get("BOT_TOKEN", "478454887:O-jcRMDoEF6QtaKObV5IVLOKc8asaY3ceys")
 BALE_BASE_URL = "https://tapi.bale.ai/bot"
 
-# --- تنظیمات ادمین ---
 ADMIN_ID = 1826980748
 NOT_ADMIN_TEXT = "بیلاخ داداش ادمین نیستی! ادمین: @unknow_user2"
 
@@ -68,23 +64,33 @@ def main_keyboard(is_mobile=False):
         ]
     ])
 
+def screenshot_to_jpeg(screenshot_bytes, quality=85):
+    """تبدیل اسکرین‌شات خام Playwright به JPEG و برگرداندن bytes"""
+    img = Image.open(BytesIO(screenshot_bytes))
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+    out = BytesIO()
+    img.save(out, format="JPEG", quality=quality)
+    return out.getvalue()
+
 def draw_grid_on_image(image_bytes, step=100):
+    """کشیدن خطوط مختصات روی تصویر (ورودی bytes خام) و خروجی JPEG"""
     image = Image.open(io.BytesIO(image_bytes))
     if image.mode in ("RGBA", "P"):
         image = image.convert("RGB")
-        
+
     draw = ImageDraw.Draw(image)
     width, height = image.size
-    
+
     for x in range(0, width, step):
         draw.line([(x, 0), (x, height)], fill="red", width=1)
         draw.text((x + 2, 5), str(x), fill="red")
-        
+
     for y in range(0, height, step):
         draw.line([(0, y), (width, y)], fill="red", width=1)
         if y != 0:
             draw.text((5, y + 2), str(y), fill="red")
-            
+
     output = io.BytesIO()
     image.save(output, format="JPEG", quality=85)
     return output.getvalue()
@@ -121,17 +127,18 @@ SMART_CLICK_JS = """
 """
 
 async def send_current_view(query_or_message, session, caption="✅ وضعیت صفحه:"):
-
-    screenshot_bytes = await session["page"].screenshot(full_page=False)
-    photo_file = InputFile(BytesIO(screenshot_bytes), filename='screenshot.png')  # اضافه شده
+    """اسکرین‌شات از نمای فعلی می‌گیرد، به JPEG تبدیل می‌کند و می‌فرستد"""
+    raw_bytes = await session["page"].screenshot(full_page=False)
+    jpeg_bytes = screenshot_to_jpeg(raw_bytes)
+    photo_file = InputFile(BytesIO(jpeg_bytes), filename="screenshot.jpg")
     markup = main_keyboard(session["is_mobile"])
-    
+
     if hasattr(query_or_message, 'message') and query_or_message.message is not None:
         await query_or_message.message.reply_photo(photo=photo_file, caption=caption, reply_markup=markup)
     else:
-        await query_or_message.reply_photo(photo=screenshot_bytes, caption=caption, reply_markup=markup)
+        await query_or_message.reply_photo(photo=photo_file, caption=caption, reply_markup=markup)
 
-# --- هندلرهای تلگرام/بله ---
+# --- هندلرهای ربات ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 خوش آمدید! لینک سایت مورد نظر را بفرستید.")
@@ -139,7 +146,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
-    
+
     if re.match(r'^https?://', text):
         await load_url(update.message, context.bot_data['pw'], context.bot_data['browser'], text, user_id)
     elif user_id in user_sessions and user_sessions[user_id].get("expected_action"):
@@ -177,11 +184,18 @@ async def load_url(message, pw, browser, url, user_id, is_mobile=False):
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
-    
-    await query.answer()
+
+    # پاسخ فوری به callback حتی اگر timeout شده باشد
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
     if user_id not in user_sessions:
-        await query.message.reply_text("⚠️ صفحه فعالی ندارید.")
+        try:
+            await query.edit_message_caption(caption="⚠️ صفحه فعالی ندارید.")
+        except Exception:
+            pass
         return
 
     action = query.data
@@ -204,14 +218,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif action == "full_screenshot":
             msg = await query.message.reply_text("⏳ گرفتن اسکرین‌شات...")
             full_pic = await page.screenshot(full_page=True)
-            file = InputFile(BytesIO(full_pic), filename='full.jpg')   # یا full.png
+            # تبدیل به JPEG با InputFile
+            file = InputFile(BytesIO(screenshot_to_jpeg(full_pic, quality=80)), filename="full.jpg")
             await query.message.reply_document(document=file, filename="full.jpg")
             await msg.delete()
 
         elif action == "pdf":
             msg = await query.message.reply_text("⏳ تولید PDF...")
             pdf_bytes = await page.pdf(format="A4")
-            file = InputFile(BytesIO(pdf_bytes), filename='page.pdf')
+            file = InputFile(BytesIO(pdf_bytes), filename="page.pdf")
             await query.message.reply_document(document=file, filename="page.pdf")
             await msg.delete()
 
@@ -219,20 +234,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elements = await page.evaluate(SMART_CLICK_JS)
             session["smart_elements"] = elements
             session["expected_action"] = "smart_click"
-            pic = await page.screenshot(full_page=False)
-            await query.message.reply_photo(photo=pic, caption="🎯 شماره المان را بفرستید:")
+            pic_raw = await page.screenshot(full_page=False)
+            pic_jpeg = screenshot_to_jpeg(pic_raw)
+            await query.message.reply_photo(
+                photo=InputFile(BytesIO(pic_jpeg), filename="smart.jpg"),
+                caption="🎯 شماره المان را بفرستید:"
+            )
 
         elif action == "coord_click":
             session["expected_action"] = "coord_click"
-            screenshot_bytes = await page.screenshot(full_page=False)
-            grid_image = draw_grid_on_image(screenshot_bytes)
-            await query.message.reply_photo(photo=grid_image, caption="📍 مختصات X Y را با فاصله بفرستید (مثال: 400 150)")
+            raw_bytes = await page.screenshot(full_page=False)
+            grid_image = draw_grid_on_image(raw_bytes)  # خروجی JPEG bytes
+            await query.message.reply_photo(
+                photo=InputFile(BytesIO(grid_image), filename="grid.jpg"),
+                caption="📍 مختصات X Y را با فاصله بفرستید (مثال: 400 150)"
+            )
 
         elif action == "type":
             session["expected_action"] = "coord_type"
-            screenshot_bytes = await page.screenshot(full_page=False)
-            grid_image = draw_grid_on_image(screenshot_bytes)
-            await query.message.reply_photo(photo=grid_image, caption="⌨️ مختصات و متن را بفرستید (مثال: 400 150 سلام)")
+            raw_bytes = await page.screenshot(full_page=False)
+            grid_image = draw_grid_on_image(raw_bytes)
+            await query.message.reply_photo(
+                photo=InputFile(BytesIO(grid_image), filename="grid.jpg"),
+                caption="⌨️ مختصات و متن را بفرستید (مثال: 400 150 سلام)"
+            )
 
         elif action == "record_video":
             session["expected_action"] = "record_video"
@@ -244,7 +269,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif action == "toggle_device":
             is_mob = not session["is_mobile"]
-            await load_url(query.message, context.bot_data['pw'], context.bot_data['browser'], session["url"], user_id, is_mobile=is_mob)
+            await load_url(query.message, context.bot_data['pw'], context.bot_data['browser'],
+                           session["url"], user_id, is_mobile=is_mob)
 
         elif action == "close":
             await session["browser_context"].close()
@@ -303,7 +329,8 @@ async def handle_action_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             await vid_context.close()
             video_path = await vid_page.video.path()
             with open(video_path, 'rb') as f:
-                await update.message.reply_video(video=f)
+                video_file = InputFile(f, filename="video.mp4")
+                await update.message.reply_video(video=video_file)
             os.remove(video_path)
             await msg.delete()
 
@@ -311,13 +338,12 @@ async def handle_action_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"❌ خطا: {e}")
         session["expected_action"] = None
 
-
-# --- اجرای هماهنگ سرور و ربات با Lifespan ---
+# --- اجرای هماهنگ سرور و ربات ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Initializing Playwright and Bot...")
-    
+
     application = (
         ApplicationBuilder()
         .token(TOKEN)
@@ -340,23 +366,18 @@ async def lifespan(app: FastAPI):
     application.add_handler(CallbackQueryHandler(button_callback))
 
     await application.initialize()
-    
-    # 🔥 اول polling را با drop_pending_updates روشن کن
     await application.updater.start_polling(drop_pending_updates=True)
-    
-    # سپس application.start() را صدا بزن (دیگر updater را دوباره راه نمی‌اندازد)
     await application.start()
-    
+
     print("--- Bot is fully Online! ---")
-    
-    yield  
-    
+    yield
+
     print("Shutting down...")
     await application.updater.stop()
     await application.stop()
     await application.bot_data['browser'].close()
     await application.bot_data['pw'].stop()
-# --- ساخت اپلیکیشن FastAPI ---
+
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/")

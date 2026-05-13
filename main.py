@@ -329,24 +329,23 @@ async def lifespan(app: FastAPI):
         args=["--no-sandbox", "--disable-setuid-sandbox"]
     )
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT, handle_text))
-    application.add_handler(CallbackQueryHandler(button_callback))
-
     await application.initialize()
-    await application.start()
+    
+    # 🔥 اول polling را با drop_pending_updates روشن کن
     await application.updater.start_polling(drop_pending_updates=True)
+    
+    # سپس application.start() را صدا بزن (دیگر updater را دوباره راه نمی‌اندازد)
+    await application.start()
     
     print("--- Bot is fully Online! ---")
     
-    yield  
+    yield 
     
     print("Shutting down...")
     await application.updater.stop()
     await application.stop()
     await application.bot_data['browser'].close()
     await application.bot_data['pw'].stop()
-
 # --- ساخت اپلیکیشن FastAPI ---
 app = FastAPI(lifespan=lifespan)
 

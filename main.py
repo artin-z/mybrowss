@@ -15,6 +15,7 @@ from telegram.ext import (
     Application
 )
 from playwright.async_api import async_playwright
+import imageio   # برای ساخت ویدیو از دنباله تصاویر
 
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
@@ -218,7 +219,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif action == "full_screenshot":
             msg = await query.message.reply_text("⏳ گرفتن اسکرین‌شات...")
             full_pic = await page.screenshot(full_page=True)
-            # تبدیل به JPEG با InputFile
             file = InputFile(BytesIO(screenshot_to_jpeg(full_pic, quality=80)), filename="full.jpg")
             await query.message.reply_document(document=file, filename="full.jpg")
             await msg.delete()
@@ -244,7 +244,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif action == "coord_click":
             session["expected_action"] = "coord_click"
             raw_bytes = await page.screenshot(full_page=False)
-            grid_image = draw_grid_on_image(raw_bytes)  # خروجی JPEG bytes
+            grid_image = draw_grid_on_image(raw_bytes)
             await query.message.reply_photo(
                 photo=InputFile(BytesIO(grid_image), filename="grid.jpg"),
                 caption="📍 مختصات X Y را با فاصله بفرستید (مثال: 400 150)"
@@ -319,20 +319,37 @@ async def handle_action_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         elif action == "record_video":
             duration = int(text.strip())
+            if duration < 5 or duration > 60:
+                await update.message.reply_text("⏱ مدت زمان باید بین ۵ تا ۶۰ ثانیه باشد.")
+                session["expected_action"] = None
+                return
             session["expected_action"] = None
-            msg = await update.message.reply_text(f"🎥 ضبط {duration} ثانیه...")
-            pw, browser = context.bot_data['pw'], context.bot_data['browser']
-            vid_context = await browser.new_context(record_video_dir="videos/")
-            vid_page = await vid_context.new_page()
-            await vid_page.goto(session["url"])
-            await asyncio.sleep(duration)
-            await vid_context.close()
-            video_path = await vid_page.video.path()
-            with open(video_path, 'rb') as f:
-                video_file = InputFile(f, filename="video.mp4")
-                await update.message.reply_video(video=video_file)
-            os.remove(video_path)
-            await msg.delete()
+            msg = await update.message.reply_text(f"🎥 در حال ضبط {duration} ثانیه از صفحه فعلی...")
+
+            fps = 10
+            total_frames = duration * fps
+            frames = []
+
+            try:
+                for i in range(total_frames):
+                    screenshot = await page.screenshot(full_page=False)
+                    img = Image.open(BytesIO(screenshot))
+                    if img.mode == "RGBA":
+                        img = img.convert("RGB")
+                    frames.append(img)
+                    await asyncio.sleep(1 / fps)
+
+                video_path = "videos/temp_record.mp4"
+                imageio.mimsave(video_path, frames, fps=fps)
+
+                with open(video_path, 'rb') as f:
+                    video_file = InputFile(f, filename="video.mp4")
+                    await update.message.reply_video(video=video_file)
+                os.remove(video_path)
+                await msg.delete()
+
+            except Exception as e:
+                await msg.edit_text(f"❌ خطا در ضبط ویدیو: {e}")
 
     except Exception as e:
         await update.message.reply_text(f"❌ خطا: {e}")

@@ -33,7 +33,7 @@ jobs:
             libgbm1 \
             libpango-1.0-0 \
             libcairo2 \
-            libasound2t64          # <-- تغییر: libasound2 → libasound2t64
+            libasound2t64
           sudo rm -rf /var/lib/apt/lists/*
 
       - name: Set up Python
@@ -44,10 +44,8 @@ jobs:
       - name: Install Python dependencies
         run: pip install --no-cache-dir --upgrade -r requirements.txt
 
-      - name: Install Playwright Chromium browser & deps
-        run: |
-          playwright install chromium
-          sudo playwright install-deps chromium
+      - name: Install Playwright Chromium browser & system deps
+        run: playwright install --with-deps chromium
 
       - name: Run main.py
         run: python main.py

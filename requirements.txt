@@ -3,3 +3,4 @@ playwright
 pillow
 fastapi
 uvicorn
+imageio[ffmpeg]

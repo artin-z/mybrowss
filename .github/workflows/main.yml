@@ -1,0 +1,24 @@
+name: Build and Run Python Dockerfile
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  docker-task:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ۱. دریافت فایل‌های پایتون و داکر فایل از مخزن شما
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ۲. ساختن ایمیج (در این مرحله فایل‌های پایتون شما داخل ایمیج قرار می‌گیرند)
+      - name: Build the Docker image
+        run: docker build . -t my-python-app:latest
+
+      # ۳. اجرای کدها (فایل‌های پایتون شما در این مرحله اجرا می‌شوند)
+      - name: Run the container
+        run: docker run my-python-app:latest

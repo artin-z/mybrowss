@@ -3,12 +3,12 @@ name: Run main.py with Playwright
 on:
   push:
     branches: [main]
-  workflow_dispatch:   # امکان اجرای دستی از تب Actions
+  workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    timeout-minutes: 350   # حداکثر زمان اجرا (نزدیک به ۶ ساعت)
+    timeout-minutes: 350
 
     steps:
       - name: Checkout repository
@@ -33,13 +33,13 @@ jobs:
             libgbm1 \
             libpango-1.0-0 \
             libcairo2 \
-            libasound2
+            libasound2t64          # <-- تغییر: libasound2 → libasound2t64
           sudo rm -rf /var/lib/apt/lists/*
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'   # می‌توانید نسخه دلخواه را بگذارید
+          python-version: '3.11'
 
       - name: Install Python dependencies
         run: pip install --no-cache-dir --upgrade -r requirements.txt
@@ -47,7 +47,7 @@ jobs:
       - name: Install Playwright Chromium browser & deps
         run: |
           playwright install chromium
-          sudo playwright install-deps chromium   # نصب وابستگی‌های سیستمی کرومیوم
+          sudo playwright install-deps chromium
 
       - name: Run main.py
         run: python main.py

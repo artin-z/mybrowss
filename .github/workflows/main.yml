@@ -1,24 +1,53 @@
-name: Build and Run Python Dockerfile
+name: Run main.py with Playwright
 
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    branches: [main]
+  workflow_dispatch:   # امکان اجرای دستی از تب Actions
 
 jobs:
-  docker-task:
+  run-script:
     runs-on: ubuntu-latest
+    timeout-minutes: 350   # حداکثر زمان اجرا (نزدیک به ۶ ساعت)
 
     steps:
-      # ۱. دریافت فایل‌های پایتون و داکر فایل از مخزن شما
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ۲. ساختن ایمیج (در این مرحله فایل‌های پایتون شما داخل ایمیج قرار می‌گیرند)
-      - name: Build the Docker image
-        run: docker build . -t my-python-app:latest
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 \
+            libnspr4 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libcups2 \
+            libdrm2 \
+            libxkbcommon0 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxext6 \
+            libxfixes3 \
+            libxrandr2 \
+            libgbm1 \
+            libpango-1.0-0 \
+            libcairo2 \
+            libasound2
+          sudo rm -rf /var/lib/apt/lists/*
 
-      # ۳. اجرای کدها (فایل‌های پایتون شما در این مرحله اجرا می‌شوند)
-      - name: Run the container
-        run: docker run my-python-app:latest
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'   # می‌توانید نسخه دلخواه را بگذارید
+
+      - name: Install Python dependencies
+        run: pip install --no-cache-dir --upgrade -r requirements.txt
+
+      - name: Install Playwright Chromium browser & deps
+        run: |
+          playwright install chromium
+          sudo playwright install-deps chromium   # نصب وابستگی‌های سیستمی کرومیوم
+
+      - name: Run main.py
+        run: python main.py

@@ -4,7 +4,7 @@ import re
 import os
 import urllib.request
 from PIL import Image, ImageDraw
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -20,6 +20,8 @@ from playwright.async_api import async_playwright
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 import uvicorn
+
+from io import BytesIO
 
 # --- تنظیمات اولیه ---
 TOKEN = os.environ.get("BOT_TOKEN", "478454887:O-jcRMDoEF6QtaKObV5IVLOKc8asaY3ceys")
@@ -119,11 +121,13 @@ SMART_CLICK_JS = """
 """
 
 async def send_current_view(query_or_message, session, caption="✅ وضعیت صفحه:"):
+
     screenshot_bytes = await session["page"].screenshot(full_page=False)
+    photo_file = InputFile(BytesIO(screenshot_bytes), filename='screenshot.png')  # اضافه شده
     markup = main_keyboard(session["is_mobile"])
     
     if hasattr(query_or_message, 'message') and query_or_message.message is not None:
-        await query_or_message.message.reply_photo(photo=screenshot_bytes, caption=caption, reply_markup=markup)
+        await query_or_message.message.reply_photo(photo=photo_file, caption=caption, reply_markup=markup)
     else:
         await query_or_message.reply_photo(photo=screenshot_bytes, caption=caption, reply_markup=markup)
 
@@ -200,13 +204,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif action == "full_screenshot":
             msg = await query.message.reply_text("⏳ گرفتن اسکرین‌شات...")
             full_pic = await page.screenshot(full_page=True)
-            await query.message.reply_document(document=full_pic, filename="full.jpg")
+            file = InputFile(BytesIO(full_pic), filename='full.jpg')   # یا full.png
+            await query.message.reply_document(document=file, filename="full.jpg")
             await msg.delete()
 
         elif action == "pdf":
             msg = await query.message.reply_text("⏳ تولید PDF...")
             pdf_bytes = await page.pdf(format="A4")
-            await query.message.reply_document(document=pdf_bytes, filename="page.pdf")
+            file = InputFile(BytesIO(pdf_bytes), filename='page.pdf')
+            await query.message.reply_document(document=file, filename="page.pdf")
             await msg.delete()
 
         elif action == "smart_click":

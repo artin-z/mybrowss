@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    # اجرای خودکار هر ۶ ساعت یکبار برای زنده نگه‌داشتن ربات
+    - cron: '0 */6 * * *'
+
 
 jobs:
   run-script:

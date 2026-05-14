@@ -5,9 +5,11 @@ on:
     branches: [main]
   workflow_dispatch:
   schedule:
-    # اجرای خودکار هر ۶ ساعت یکبار برای زنده نگه‌داشتن ربات
     - cron: '0 */6 * * *'
 
+# دادن دسترسی نوشتن روی مخزن
+permissions:
+  contents: write
 
 jobs:
   run-script:
@@ -17,27 +19,18 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # لازم است تا بتوان push کرد
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libnss3 \
-            libnspr4 \
-            libatk1.0-0 \
-            libatk-bridge2.0-0 \
-            libcups2 \
-            libdrm2 \
-            libxkbcommon0 \
-            libxcomposite1 \
-            libxdamage1 \
-            libxext6 \
-            libxfixes3 \
-            libxrandr2 \
-            libgbm1 \
-            libpango-1.0-0 \
-            libcairo2 \
-            libasound2t64
+            libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
+            libxdamage1 libxext6 libxfixes3 libxrandr2 \
+            libgbm1 libpango-1.0-0 libcairo2 libasound2t64
           sudo rm -rf /var/lib/apt/lists/*
 
       - name: Set up Python
@@ -51,5 +44,34 @@ jobs:
       - name: Install Playwright Chromium browser & system deps
         run: playwright install --with-deps chromium
 
-      - name: Run main.py
-        run: python main.py
+      # مرحله اصلی: اجرای ربات در پس‌زمینه و سپس توقف کنترل‌شده
+      - name: Run bot in background and wait
+        run: |
+          python main.py &
+          BOT_PID=$!
+          echo "Bot started with PID $BOT_PID"
+
+          # ۳۰۰ دقیقه (۵ ساعت) اجرا شود، بعد خاموش شود
+          sleep 300m
+
+          echo "Shutting down bot..."
+          kill $BOT_PID
+
+          # صبر می‌کنیم تا فرایند کاملاً بسته شود
+          wait $BOT_PID
+          echo "Bot stopped."
+
+      # کامیت و push فایل دیتابیس (حتی اگر مرحله قبل خطا داده باشد)
+      - name: Commit and push database
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          # فقط فایل دیتابیس را اضافه می‌کنیم
+          git add bot_data.db
+
+          # اگر تغییری وجود نداشت، کامیت نمی‌شود
+          git commit -m "Update bot_data.db [skip ci]" || echo "No changes to commit"
+
+          git push

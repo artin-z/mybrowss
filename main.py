@@ -15,7 +15,7 @@ from telegram.ext import (
     Application
 )
 from playwright.async_api import async_playwright
-import imageio   # برای ساخت ویدیو از دنباله تصاویر
+import imageio
 
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
@@ -66,7 +66,6 @@ def main_keyboard(is_mobile=False):
     ])
 
 def screenshot_to_jpeg(screenshot_bytes, quality=85):
-    """تبدیل اسکرین‌شات خام Playwright به JPEG و برگرداندن bytes"""
     img = Image.open(BytesIO(screenshot_bytes))
     if img.mode in ("RGBA", "P"):
         img = img.convert("RGB")
@@ -75,7 +74,6 @@ def screenshot_to_jpeg(screenshot_bytes, quality=85):
     return out.getvalue()
 
 def draw_grid_on_image(image_bytes, step=100):
-    """کشیدن خطوط مختصات روی تصویر (ورودی bytes خام) و خروجی JPEG"""
     image = Image.open(io.BytesIO(image_bytes))
     if image.mode in ("RGBA", "P"):
         image = image.convert("RGB")
@@ -128,7 +126,6 @@ SMART_CLICK_JS = """
 """
 
 async def send_current_view(query_or_message, session, caption="✅ وضعیت صفحه:"):
-    """اسکرین‌شات از نمای فعلی می‌گیرد، به JPEG تبدیل می‌کند و می‌فرستد"""
     raw_bytes = await session["page"].screenshot(full_page=False)
     jpeg_bytes = screenshot_to_jpeg(raw_bytes)
     photo_file = InputFile(BytesIO(jpeg_bytes), filename="screenshot.jpg")
@@ -161,13 +158,19 @@ async def load_url(message, pw, browser, url, user_id, is_mobile=False):
         if user_id in user_sessions and "browser_context" in user_sessions[user_id]:
             await user_sessions[user_id]["browser_context"].close()
 
-        context_options = {"viewport": {"width": 1280, "height": 720}}
+        # تنظیمات پایه viewport و User-Agent واقعی
+        context_options = {
+            "viewport": {"width": 1280, "height": 720},
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        }
         if is_mobile:
             context_options = pw.devices['iPhone 13']
 
-        new_context = await browser.new_context(**context_options)
+        # نادیده گرفتن خطاهای SSL/HTTPS (مفید برای برخی سایت‌ها)
+        new_context = await browser.new_context(**context_options, ignore_https_errors=True)
         page = await new_context.new_page()
-        await page.goto(url, timeout=60000, wait_until="networkidle")
+        # استفاده از domcontentloaded به جای networkidle برای کاهش خطاهای timeout/پروتکل
+        await page.goto(url, timeout=60000, wait_until="domcontentloaded")
 
         user_sessions[user_id] = {
             "browser_context": new_context,
@@ -186,7 +189,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
 
-    # پاسخ فوری به callback حتی اگر timeout شده باشد
     try:
         await query.answer()
     except Exception:
@@ -213,7 +215,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_current_view(query, session, "⬇️ اسکرول پایین")
 
         elif action == "refresh":
-            await page.reload(wait_until="networkidle")
+            await page.reload(wait_until="domcontentloaded")
             await send_current_view(query, session, "🔄 رفرش شد")
 
         elif action == "full_screenshot":
@@ -373,9 +375,10 @@ async def lifespan(app: FastAPI):
     )
 
     application.bot_data['pw'] = await async_playwright().start()
+    # اضافه کردن --disable-http2 برای جلوگیری از خطای HTTP/2
     application.bot_data['browser'] = await application.bot_data['pw'].chromium.launch(
         headless=True,
-        args=["--no-sandbox", "--disable-setuid-sandbox"]
+        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-http2"]
     )
 
     application.add_handler(CommandHandler("start", start))

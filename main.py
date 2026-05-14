@@ -558,15 +558,13 @@ async def lifespan(app: FastAPI):
         args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-http2"]
     )
 
-    # هندلرهای عمومی
+    # ⬇️ ترتیب اضافه کردن هندلرها بسیار مهم است ⬇️
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT, handle_text))
-    application.add_handler(CallbackQueryHandler(button_callback))
-
-    # هندلرهای ادمین
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("users", users_command))
     application.add_handler(CommandHandler("sites", sites_command))
+    application.add_handler(MessageHandler(filters.TEXT, handle_text))
+    application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
 
     await application.initialize()

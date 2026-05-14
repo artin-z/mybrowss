@@ -5,11 +5,11 @@ on:
     branches: [main]
   workflow_dispatch:
   schedule:
+    # اجرای خودکار هر ۶ ساعت یکبار
     - cron: '0 */6 * * *'
 
-# دادن دسترسی نوشتن روی مخزن
 permissions:
-  contents: write
+  contents: write          # اجازه نوشتن روی مخزن
 
 jobs:
   run-script:
@@ -20,7 +20,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # لازم است تا بتوان push کرد
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install system dependencies
@@ -41,37 +40,32 @@ jobs:
       - name: Install Python dependencies
         run: pip install --no-cache-dir --upgrade -r requirements.txt
 
-      - name: Install Playwright Chromium browser & system deps
+      - name: Install Playwright Chromium & system deps
         run: playwright install --with-deps chromium
 
-      # مرحله اصلی: اجرای ربات در پس‌زمینه و سپس توقف کنترل‌شده
       - name: Run bot in background and wait
         run: |
           python main.py &
           BOT_PID=$!
           echo "Bot started with PID $BOT_PID"
 
-          # ۳۰۰ دقیقه (۵ ساعت) اجرا شود، بعد خاموش شود
+          # ربات ۳۰۰ دقیقه (۵ ساعت) فعال می‌ماند
           sleep 300m
 
           echo "Shutting down bot..."
           kill $BOT_PID
-
-          # صبر می‌کنیم تا فرایند کاملاً بسته شود
-          wait $BOT_PID
+          wait $BOT_PID || true
           echo "Bot stopped."
 
-      # کامیت و push فایل دیتابیس (حتی اگر مرحله قبل خطا داده باشد)
       - name: Commit and push database
-        if: always()
+        if: always()          # حتی اگر مرحله قبل خطا بدهد، دیتابیس ذخیره شود
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
-          # فقط فایل دیتابیس را اضافه می‌کنیم
           git add bot_data.db
 
-          # اگر تغییری وجود نداشت، کامیت نمی‌شود
+          # اگر تغییری نداشته باشد کامیت ساخته نمی‌شود
           git commit -m "Update bot_data.db [skip ci]" || echo "No changes to commit"
 
           git push

@@ -211,16 +211,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
 
+    # اصلاح اولویت: اگر کاربر در حالت انتظار است، همان را پردازش کن (حتی اگر ورودی شبیه URL باشد)
+    if user_id in user_sessions and user_sessions[user_id].get("expected_action"):
+        await handle_action_input(update, context)
+        return
+
+    # در غیر این صورت، URL پردازش شود
     if re.match(r'^https?://', text):
         await load_url(update.message, context.bot_data['pw'], context.bot_data['browser'], text, user_id)
-    elif user_id in user_sessions and user_sessions[user_id].get("expected_action"):
-        await handle_action_input(update, context)
     else:
         await update.message.reply_text("⚠️ یک لینک معتبر بفرستید.")
 
 async def load_url(message, pw, browser, url, user_id, is_mobile=False):
     processing_msg = await message.reply_text("⏳ در حال بارگذاری...")
+    new_context = None
     try:
+        # بستن session قبلی در صورت وجود
         if user_id in user_sessions and "browser_context" in user_sessions[user_id]:
             await user_sessions[user_id]["browser_context"].close()
 
@@ -251,6 +257,9 @@ async def load_url(message, pw, browser, url, user_id, is_mobile=False):
         await send_current_view(message, user_sessions[user_id], f"✅ لود شد:\n🔗 {url}")
         await processing_msg.delete()
     except Exception as e:
+        # بستن context جدید در صورت خطا برای جلوگیری از نشت حافظه
+        if new_context:
+            await new_context.close()
         await processing_msg.edit_text(f"❌ خطا: {e}")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -336,6 +345,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif action == "scrape":
             text_content = await page.evaluate("document.body.innerText")
             await query.message.reply_text(f"📄 متن:\n\n{text_content[:4000]}")
+
+        elif action == "wayback":
+            await query.message.reply_text("📦 قابلیت بایگانی در حال توسعه است. لطفاً صبور باشید.")
 
         elif action == "toggle_device":
             is_mob = not session["is_mobile"]
@@ -512,10 +524,9 @@ async def send_sites_list(target):
     lines = []
     for uid, url, vtime in visits:
         try:
-            # تبدیل زمان به رشته خوانا
             dt = datetime.strptime(vtime, "%Y-%m-%d %H:%M:%S.%f")
         except ValueError:
-            dt = vtime  # اگر قالب فرق داشت
+            dt = vtime
         lines.append(f"👤 `{uid}` → {url}  _{dt}_")
 
     full_text = "🌐 **سایت‌های بازدید شده:**\n\n" + "\n".join(lines)
@@ -537,8 +548,6 @@ async def send_sites_list(target):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Initializing Playwright and Bot...")
-
-    # راه‌اندازی دیتابیس
     init_db()
 
     application = (
@@ -558,14 +567,14 @@ async def lifespan(app: FastAPI):
         args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-http2"]
     )
 
-    # ⬇️ ترتیب اضافه کردن هندلرها بسیار مهم است ⬇️
+    # ترتیب صحیح: اول هندلر ادمین (با pattern) سپس هندلر عمومی
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("users", users_command))
     application.add_handler(CommandHandler("sites", sites_command))
     application.add_handler(MessageHandler(filters.TEXT, handle_text))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
+    application.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))  # ابتدا ادمین
+    application.add_handler(CallbackQueryHandler(button_callback))                   # سپس بقیه
 
     await application.initialize()
     await application.updater.start_polling(drop_pending_updates=True)

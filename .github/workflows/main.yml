@@ -5,11 +5,15 @@ on:
     branches: [main]
   workflow_dispatch:
   schedule:
-    # اجرای خودکار هر ۶ ساعت یکبار
     - cron: '0 */6 * * *'
 
 permissions:
-  contents: write          # اجازه نوشتن روی مخزن
+  contents: write
+
+# فقط یک اجرا در هر زمان مجاز است – بقیه در صف می‌مانند
+concurrency:
+  group: bot-run
+  cancel-in-progress: false
 
 jobs:
   run-script:
@@ -48,24 +52,32 @@ jobs:
           python main.py &
           BOT_PID=$!
           echo "Bot started with PID $BOT_PID"
-
-          # ربات ۳۰۰ دقیقه (۵ ساعت) فعال می‌ماند
           sleep 300m
-
           echo "Shutting down bot..."
           kill $BOT_PID
           wait $BOT_PID || true
           echo "Bot stopped."
 
       - name: Commit and push database
-        if: always()          # حتی اگر مرحله قبل خطا بدهد، دیتابیس ذخیره شود
+        if: always()
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
           git add bot_data.db
-
-          # اگر تغییری نداشته باشد کامیت ساخته نمی‌شود
           git commit -m "Update bot_data.db [skip ci]" || echo "No changes to commit"
+
+          # ابتدا تغییرات ریموت را دریافت کن
+          git fetch origin main
+
+          # rebase روی ریموت انجام بده و در صورت تداخل، نسخه‌ی ما (ours) را نگه دار
+          # توجه: چون فایل دیتابیس باینری است، گیت نمی‌تواند خودکار merge کند،
+          # بنابراین در صورت تداخل از ours استفاده می‌کنیم.
+          git rebase origin/main || {
+            # اگر rebase به دلیل تداخل متوقف شد، تداخل‌ها را با قبول نسخه‌ی ما حل کن
+            git checkout --ours bot_data.db 2>/dev/null || true
+            git add bot_data.db
+            git rebase --continue
+          }
 
           git push

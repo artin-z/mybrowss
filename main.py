@@ -488,7 +488,23 @@ async def handle_action_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"❌ خطا: {e}")
         session["expected_action"] = None
 
-# ========== بخش مدیریت ادمین (اصلاح‌شده) ==========
+# ========== بخش مدیریت ادمین (کامل) ==========
+
+def get_all_visits_with_users():
+    """لیست بازدیدها همراه با نام و یوزرنیم کاربر (JOIN با users)"""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT v.user_id, v.url, v.visited_at,
+               u.first_name, u.last_name, u.username
+        FROM visits v
+        LEFT JOIN users u ON v.user_id = u.user_id
+        ORDER BY v.visited_at DESC
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -542,9 +558,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_users_list(target):
     """
     نمایش لیست کاربران همراه با نام، نام‌خانوادگی و یوزرنیم.
-    از get_all_users() استفاده می‌کند که لیستی از (user_id, first_name, last_name, username) برمی‌گرداند.
     """
-    users = get_all_users()   # حالا تاپل‌های ۴ تایی دارد
+    users = get_all_users()   # بازگرداندن (user_id, first_name, last_name, username)
     if not users:
         text = "ℹ️ هنوز هیچ کاربری از ربات استفاده نکرده است."
         if hasattr(target, 'message'):
@@ -555,7 +570,6 @@ async def send_users_list(target):
 
     lines = []
     for uid, fname, lname, uname in users:
-        # ساخت نام نمایشی
         name_parts = []
         if fname:
             name_parts.append(fname)
@@ -586,10 +600,9 @@ async def send_users_list(target):
 
 async def send_sites_list(target):
     """
-    نمایش تاریخچه بازدیدها.
-    برای هر بازدید فقط user_id و url و زمان را نشان می‌دهد.
+    نمایش تاریخچه بازدیدها همراه با نام و یوزرنیم کاربر.
     """
-    visits = get_all_visits()
+    visits = get_all_visits_with_users()
     if not visits:
         text = "ℹ️ هنوز هیچ سایتی بارگذاری نشده است."
         if hasattr(target, 'message'):
@@ -599,12 +612,27 @@ async def send_sites_list(target):
         return
 
     lines = []
-    for uid, url, vtime in visits:
+    for uid, url, vtime, fname, lname, uname in visits:
+        # ساخت نام نمایشی
+        name_parts = []
+        if fname:
+            name_parts.append(fname)
+        if lname:
+            name_parts.append(lname)
+        full_name = " ".join(name_parts) if name_parts else "بی‌نام"
+
+        # فرمت زمان
         try:
             dt = datetime.strptime(vtime, "%Y-%m-%d %H:%M:%S.%f")
         except ValueError:
             dt = vtime
-        lines.append(f"👤 `{uid}` → {url}  _{dt}_")
+
+        if uname:
+            user_display = f"{full_name} (@{uname})"
+        else:
+            user_display = full_name
+
+        lines.append(f"👤 {user_display}  `{uid}` → {url}  _{dt}_")
 
     full_text = "🌐 **سایت‌های بازدید شده:**\n\n" + "\n".join(lines)
 

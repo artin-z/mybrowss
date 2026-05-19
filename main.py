@@ -2,7 +2,7 @@ import asyncio
 import io
 import re
 import os
-import sqlite3
+import aiosqlite
 import time
 from datetime import datetime
 from io import BytesIO
@@ -34,152 +34,114 @@ DB_PATH = "bot_data.db"
 user_sessions = {}
 admin_states = {}
 
+db_conn = None
+db_lock = asyncio.Lock()
+
 if not os.path.exists("videos"):
     os.makedirs("videos")
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    first_seen TIMESTAMP,
-                    last_seen TIMESTAMP
-                )''')
+async def init_db():
+    global db_conn
+    db_conn = await aiosqlite.connect(DB_PATH)
+    await db_conn.execute("PRAGMA journal_mode=WAL")
+    await db_conn.execute('''CREATE TABLE IF NOT EXISTS users (
+                        user_id INTEGER PRIMARY KEY,
+                        first_seen TIMESTAMP,
+                        last_seen TIMESTAMP
+                    )''')
     for col, col_type in [("first_name", "TEXT"), ("last_name", "TEXT"), ("username", "TEXT")]:
         try:
-            c.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
-        except sqlite3.OperationalError:
+            await db_conn.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
+        except:
             pass
-    c.execute('''CREATE TABLE IF NOT EXISTS visits (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    url TEXT,
-                    visited_at TIMESTAMP,
-                    FOREIGN KEY(user_id) REFERENCES users(user_id)
-                )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS banned_users (
-                    user_id INTEGER PRIMARY KEY,
-                    banned_at TIMESTAMP
-                )''')
-    conn.commit()
-    conn.close()
+    await db_conn.execute('''CREATE TABLE IF NOT EXISTS visits (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER,
+                        url TEXT,
+                        visited_at TIMESTAMP,
+                        FOREIGN KEY(user_id) REFERENCES users(user_id)
+                    )''')
+    await db_conn.execute('''CREATE TABLE IF NOT EXISTS banned_users (
+                        user_id INTEGER PRIMARY KEY,
+                        banned_at TIMESTAMP
+                    )''')
+    await db_conn.commit()
 
-def get_db():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
-
-def add_user_sync(user_id: int, user=None):
-    conn = get_db()
-    c = conn.cursor()
+async def add_user(user_id: int, user=None):
     now = datetime.now()
     first_name = user.first_name if user else None
     last_name = user.last_name if user else None
     username = user.username if user else None
-    c.execute("""
-        INSERT INTO users (user_id, first_seen, last_seen, first_name, last_name, username)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            last_seen = ?,
-            first_name = COALESCE(?, first_name),
-            last_name = COALESCE(?, last_name),
-            username = COALESCE(?, username)
-    """, (user_id, now, now, first_name, last_name, username,
-          now, first_name, last_name, username))
-    conn.commit()
-    conn.close()
+    async with db_lock:
+        await db_conn.execute("""
+            INSERT INTO users (user_id, first_seen, last_seen, first_name, last_name, username)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                last_seen = ?,
+                first_name = COALESCE(?, first_name),
+                last_name = COALESCE(?, last_name),
+                username = COALESCE(?, username)
+        """, (user_id, now, now, first_name, last_name, username,
+              now, first_name, last_name, username))
+        await db_conn.commit()
 
-def add_visit_sync(user_id: int, url: str):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("INSERT INTO visits (user_id, url, visited_at) VALUES (?, ?, ?)",
-              (user_id, url, datetime.now()))
-    conn.commit()
-    conn.close()
+async def add_visit(user_id: int, url: str):
+    async with db_lock:
+        await db_conn.execute("INSERT INTO visits (user_id, url, visited_at) VALUES (?, ?, ?)",
+                              (user_id, url, datetime.now()))
+        await db_conn.commit()
 
-def get_all_users_sync():
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT user_id, first_name, last_name, username FROM users ORDER BY user_id")
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def get_all_visits_sync():
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT user_id, url, visited_at FROM visits ORDER BY visited_at DESC")
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def is_user_banned_sync(user_id: int) -> bool:
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
-    result = c.fetchone()
-    conn.close()
-    return result is not None
-
-def ban_user_sync(user_id: int):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO banned_users (user_id, banned_at) VALUES (?, ?)",
-              (user_id, datetime.now()))
-    conn.commit()
-    conn.close()
-
-def unban_user_sync(user_id: int):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
-
-def get_banned_users_sync():
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("""
-        SELECT b.user_id, u.first_name, u.last_name, u.username
-        FROM banned_users b
-        LEFT JOIN users u ON b.user_id = u.user_id
-        ORDER BY b.banned_at DESC
-    """)
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def get_all_visits_with_users_sync():
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("""
-        SELECT v.user_id, v.url, v.visited_at,
-               u.first_name, u.last_name, u.username
-        FROM visits v
-        LEFT JOIN users u ON v.user_id = u.user_id
-        ORDER BY v.visited_at DESC
-    """)
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-
-async def add_user(user_id, user=None):
-    return await asyncio.to_thread(add_user_sync, user_id, user)
-async def add_visit(user_id, url):
-    return await asyncio.to_thread(add_visit_sync, user_id, url)
 async def get_all_users():
-    return await asyncio.to_thread(get_all_users_sync)
+    async with db_lock:
+        cursor = await db_conn.execute("SELECT user_id, first_name, last_name, username FROM users ORDER BY user_id")
+        rows = await cursor.fetchall()
+    return rows
+
 async def get_all_visits():
-    return await asyncio.to_thread(get_all_visits_sync)
-async def is_user_banned(user_id):
-    return await asyncio.to_thread(is_user_banned_sync, user_id)
-async def ban_user(user_id):
-    return await asyncio.to_thread(ban_user_sync, user_id)
-async def unban_user(user_id):
-    return await asyncio.to_thread(unban_user_sync, user_id)
+    async with db_lock:
+        cursor = await db_conn.execute("SELECT user_id, url, visited_at FROM visits ORDER BY visited_at DESC")
+        rows = await cursor.fetchall()
+    return rows
+
+async def is_user_banned(user_id: int) -> bool:
+    async with db_lock:
+        cursor = await db_conn.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
+        row = await cursor.fetchone()
+    return row is not None
+
+async def ban_user(user_id: int):
+    async with db_lock:
+        await db_conn.execute("INSERT OR IGNORE INTO banned_users (user_id, banned_at) VALUES (?, ?)",
+                              (user_id, datetime.now()))
+        await db_conn.commit()
+
+async def unban_user(user_id: int):
+    async with db_lock:
+        await db_conn.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
+        await db_conn.commit()
+
 async def get_banned_users():
-    return await asyncio.to_thread(get_banned_users_sync)
+    async with db_lock:
+        cursor = await db_conn.execute("""
+            SELECT b.user_id, u.first_name, u.last_name, u.username
+            FROM banned_users b
+            LEFT JOIN users u ON b.user_id = u.user_id
+            ORDER BY b.banned_at DESC
+        """)
+        rows = await cursor.fetchall()
+    return rows
+
 async def get_all_visits_with_users():
-    return await asyncio.to_thread(get_all_visits_with_users_sync)
+    async with db_lock:
+        cursor = await db_conn.execute("""
+            SELECT v.user_id, v.url, v.visited_at,
+                   u.first_name, u.last_name, u.username
+            FROM visits v
+            LEFT JOIN users u ON v.user_id = u.user_id
+            ORDER BY v.visited_at DESC
+        """)
+        rows = await cursor.fetchall()
+    return rows
 
 def main_keyboard(is_mobile=False):
     device_btn = "📱 موبایل" if not is_mobile else "💻 دسکتاپ"
@@ -287,6 +249,7 @@ async def track_user(update: Update):
     if user:
         await add_user(user.id, user)
 
+# ========== زمان‌سنج بیکاری ==========
 async def idle_session_cleaner(bot):
     while True:
         await asyncio.sleep(60)
@@ -815,8 +778,9 @@ async def send_banned_list(target):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global db_conn
     print("Initializing Playwright and Bot...")
-    init_db()
+    await init_db()
 
     application = (
         ApplicationBuilder()
@@ -864,6 +828,8 @@ async def lifespan(app: FastAPI):
     await application.stop()
     await application.bot_data['browser'].close()
     await application.bot_data['pw'].stop()
+    if db_conn:
+        await db_conn.close()
 
 app = FastAPI(lifespan=lifespan)
 

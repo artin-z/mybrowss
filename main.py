@@ -3,6 +3,7 @@ import io
 import re
 import os
 import sqlite3
+import time
 from datetime import datetime
 from io import BytesIO
 from PIL import Image, ImageDraw
@@ -17,7 +18,7 @@ from telegram.ext import (
     Application
 )
 from playwright.async_api import async_playwright
-import imageio
+import imageio.v3 as iio
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 import uvicorn
@@ -36,7 +37,6 @@ admin_states = {}
 if not os.path.exists("videos"):
     os.makedirs("videos")
 
-# ========== پایگاه داده (توابع همگام) ==========
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -161,35 +161,26 @@ def get_all_visits_with_users_sync():
     conn.close()
     return rows
 
-# ========== پوشش async برای دیتابیس ==========
+
 async def add_user(user_id, user=None):
     return await asyncio.to_thread(add_user_sync, user_id, user)
-
 async def add_visit(user_id, url):
     return await asyncio.to_thread(add_visit_sync, user_id, url)
-
 async def get_all_users():
     return await asyncio.to_thread(get_all_users_sync)
-
 async def get_all_visits():
     return await asyncio.to_thread(get_all_visits_sync)
-
 async def is_user_banned(user_id):
     return await asyncio.to_thread(is_user_banned_sync, user_id)
-
 async def ban_user(user_id):
     return await asyncio.to_thread(ban_user_sync, user_id)
-
 async def unban_user(user_id):
     return await asyncio.to_thread(unban_user_sync, user_id)
-
 async def get_banned_users():
     return await asyncio.to_thread(get_banned_users_sync)
-
 async def get_all_visits_with_users():
     return await asyncio.to_thread(get_all_visits_with_users_sync)
 
-# ========== توابع کمکی ==========
 def main_keyboard(is_mobile=False):
     device_btn = "📱 موبایل" if not is_mobile else "💻 دسکتاپ"
     return InlineKeyboardMarkup([
@@ -273,6 +264,14 @@ SMART_CLICK_JS = """
 }
 """
 
+CLEANUP_SMART_CLICK_JS = """
+() => {
+    document.querySelectorAll('div[style*="z-index: 10000"]').forEach(e => e.remove());
+    document.querySelectorAll('a, button, input, textarea, select, [role="button"], [role="textbox"], [contenteditable="true"]')
+        .forEach(el => el.style.border = '');
+}
+"""
+
 async def send_current_view(query_or_message, session, caption="✅ وضعیت صفحه:"):
     raw_bytes = await session["page"].screenshot(full_page=False)
     jpeg_bytes = screenshot_to_jpeg(raw_bytes)
@@ -288,7 +287,29 @@ async def track_user(update: Update):
     if user:
         await add_user(user.id, user)
 
-# ========== هندلرهای عمومی ==========
+async def idle_session_cleaner(bot):
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        to_delete = []
+        for user_id, sess in list(user_sessions.items()):
+            if now - sess.get("last_activity", 0) > 900:
+                to_delete.append(user_id)
+        for user_id in to_delete:
+            sess = user_sessions[user_id]
+            try:
+                await sess["browser_context"].close()
+            except:
+                pass
+            try:
+                await bot.send_message(
+                    chat_id=sess["chat_id"],
+                    text="⏰ مرورگر به علت ۱۵ دقیقه بی‌کار ماندن بسته شد."
+                )
+            except:
+                pass
+            del user_sessions[user_id]
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID and await is_user_banned(user_id):
@@ -302,14 +323,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
+
     if user_id == ADMIN_ID and user_id in admin_states:
         await handle_admin_input(update, context)
         return
 
     await track_user(update)
+
     if user_id in user_sessions and user_sessions[user_id].get("expected_action"):
-        await handle_action_input(update, context)
-        return
+        if re.match(r'^https?://', text):
+            user_sessions[user_id]["expected_action"] = None
+            await load_url(update.message, context.bot_data['pw'], context.bot_data['browser'], text, user_id)
+            return
+        else:
+            await handle_action_input(update, context)
+            return
 
     if re.match(r'^https?://', text):
         await load_url(update.message, context.bot_data['pw'], context.bot_data['browser'], text, user_id)
@@ -354,7 +382,9 @@ async def load_url(message, pw, browser, url, user_id, is_mobile=False):
             "url": url,
             "is_mobile": is_mobile,
             "expected_action": None,
-            "smart_elements": {}
+            "smart_elements": {},
+            "last_activity": time.time(),
+            "chat_id": message.chat.id
         }
         await add_user(user_id, message.from_user)
         await add_visit(user_id, url)
@@ -375,10 +405,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    try:
-        await query.answer()
-    except:
-        pass
+    await query.answer()
+
+    if query.data == "cancel_action":
+        if user_id in user_sessions:
+            user_sessions[user_id]["expected_action"] = None
+            try:
+                await query.edit_message_caption(caption="❌ عملیات لغو شد.")
+            except:
+                await query.edit_message_text("❌ عملیات لغو شد.")
+        return
 
     if user_id not in user_sessions:
         try:
@@ -387,9 +423,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    action = query.data
     session = user_sessions[user_id]
     page = session["page"]
+
+    if page.is_closed():
+        try:
+            await session["browser_context"].close()
+        except:
+            pass
+        del user_sessions[user_id]
+        try:
+            await query.edit_message_caption(caption="⚠️ مرورگر به دلیل خطا بسته شده است. لطفاً دوباره لینک را ارسال کنید.")
+        except:
+            pass
+        return
+
+    session["last_activity"] = time.time()
+
+    action = query.data
     try:
         if action == "scroll_up":
             await page.evaluate("window.scrollBy(0, -600)")
@@ -418,26 +469,35 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session["expected_action"] = "smart_click"
             pic_raw = await page.screenshot(full_page=False)
             pic_jpeg = screenshot_to_jpeg(pic_raw)
+            cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data="cancel_action")]])
             await query.message.reply_photo(
                 photo=InputFile(BytesIO(pic_jpeg), filename="smart.jpg"),
-                caption="🎯 شماره المان را بفرستید:")
+                caption="🎯 شماره المان را بفرستید:",
+                reply_markup=cancel_kb)
         elif action == "coord_click":
             session["expected_action"] = "coord_click"
             raw_bytes = await page.screenshot(full_page=False)
             grid_image = draw_grid_on_image(raw_bytes)
+            cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data="cancel_action")]])
             await query.message.reply_photo(
                 photo=InputFile(BytesIO(grid_image), filename="grid.jpg"),
-                caption="📍 مختصات X Y را با فاصله بفرستید (مثال: 400 150)")
+                caption="📍 مختصات X Y را با فاصله بفرستید (مثال: 400 150)",
+                reply_markup=cancel_kb)
         elif action == "type":
             session["expected_action"] = "coord_type"
             raw_bytes = await page.screenshot(full_page=False)
             grid_image = draw_grid_on_image(raw_bytes)
+            cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data="cancel_action")]])
             await query.message.reply_photo(
                 photo=InputFile(BytesIO(grid_image), filename="grid.jpg"),
-                caption="⌨️ مختصات و متن را بفرستید (مثال: 400 150 سلام)")
+                caption="⌨️ مختصات و متن را بفرستید (مثال: 400 150 سلام)",
+                reply_markup=cancel_kb)
         elif action == "record_video":
             session["expected_action"] = "record_video"
-            await query.message.reply_text("📹 زمان ویدیو (۵ تا ۶۰ ثانیه) را بفرستید:")
+            cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data="cancel_action")]])
+            await query.message.reply_text(
+                "📹 زمان ویدیو (۵ تا ۶۰ ثانیه) را بفرستید:",
+                reply_markup=cancel_kb)
         elif action == "scrape":
             text_content = await page.evaluate("document.body.innerText")
             await query.message.reply_text(f"📄 متن:\n\n{text_content[:4000]}")
@@ -461,12 +521,24 @@ async def handle_action_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = update.message.text
     page = session["page"]
 
+    if page.is_closed():
+        try:
+            await session["browser_context"].close()
+        except:
+            pass
+        del user_sessions[user_id]
+        await update.message.reply_text("⚠️ مرورگر به دلیل خطا بسته شده است. لطفاً دوباره لینک را ارسال کنید.")
+        return
+
+    session["last_activity"] = time.time()
+
     try:
         if action == "smart_click":
             element_id = text.strip()
             elements = session.get("smart_elements", {})
             if str(element_id) in elements:
                 await page.mouse.click(float(elements[element_id]['x']), float(elements[element_id]['y']))
+                await page.evaluate(CLEANUP_SMART_CLICK_JS)
                 await asyncio.sleep(2)
                 session["expected_action"] = None
                 await send_current_view(update, session, "✅ کلیک انجام شد.")
@@ -509,51 +581,45 @@ async def handle_action_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             fps = 10
             total_frames = duration * fps
             video_path = f"videos/record_{user_id}_{int(datetime.now().timestamp())}.mp4"
-            writer = None
+
             try:
-                writer = imageio.get_writer(
-                    video_path, fps=fps, format='FFMPEG',
-                    codec='libx264', quality=8, pixelformat='yuv420p'
-                )
-                for _ in range(total_frames):
-                    screenshot = await page.screenshot(full_page=False, type='png')
-                    img = Image.open(BytesIO(screenshot))
-                    if img.mode != "RGB":
-                        img = img.convert("RGB")
-                    max_width = 1280
-                    if img.width > max_width:
-                        ratio = max_width / img.width
-                        new_height = int(img.height * ratio)
-                        img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
-                    frame_array = np.array(img)
-                    writer.append_data(frame_array)
-                    await asyncio.sleep(1 / fps)
-                writer.close()
-                writer = None
+                with iio.imopen(video_path, "w", plugin="pyav") as out_video:
+                    out_video.init_video_stream("libx264", fps=fps)
+                    for _ in range(total_frames):
+                        screenshot = await page.screenshot(full_page=False, type='png')
+                        img = Image.open(BytesIO(screenshot))
+                        if img.mode != "RGB":
+                            img = img.convert("RGB")
+                        max_width = 1280
+                        if img.width > max_width:
+                            ratio = max_width / img.width
+                            new_height = int(img.height * ratio)
+                            img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
+                        frame_array = np.array(img)
+                        out_video.write_frame(frame_array)
+                        await asyncio.sleep(1 / fps)
+
                 with open(video_path, 'rb') as f:
                     video_file = InputFile(f, filename="video.mp4")
                     await update.message.reply_video(video=video_file)
                 os.remove(video_path)
                 await msg.delete()
+
             except Exception as e:
-                if writer is not None:
-                    try:
-                        writer.close()
-                    except:
-                        pass
                 if os.path.exists(video_path):
                     os.remove(video_path)
                 await msg.edit_text(f"❌ خطا در ضبط ویدیو: {e}")
+
     except Exception as e:
         await update.message.reply_text(f"❌ خطا: {e}")
         session["expected_action"] = None
 
-# ========== بخش مدیریت ادمین ==========
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID:
         await update.message.reply_text(NOT_ADMIN_TEXT)
         return
+    admin_states.pop(user_id, None)
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("👥 لیست کاربران", callback_data="admin_users")],
         [InlineKeyboardButton("🌐 لینک‌های بازدید شده", callback_data="admin_sites")],
@@ -584,6 +650,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await query.answer()
     data = query.data
+
+    if data == "admin_cancel_ban":
+        admin_states.pop(user_id, None)
+        await query.edit_message_text("❌ عملیات لغو شد.")
+        return
+
     if data == "admin_users":
         await send_users_list(query)
     elif data == "admin_sites":
@@ -592,16 +664,20 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("پنل مدیریت بسته شد.")
     elif data == "admin_ban":
         admin_states[user_id] = "awaiting_ban_id"
-        await query.message.reply_text("🔢 لطفاً آیدی عددی کاربر برای بن را ارسال کنید:")
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data="admin_cancel_ban")]])
+        await query.message.reply_text("🔢 لطفاً آیدی عددی کاربر برای بن را ارسال کنید:", reply_markup=cancel_kb)
     elif data == "admin_unban":
         admin_states[user_id] = "awaiting_unban_id"
-        await query.message.reply_text("🔢 لطفاً آیدی عددی کاربر برای رفع بن را ارسال کنید:")
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data="admin_cancel_ban")]])
+        await query.message.reply_text("🔢 لطفاً آیدی عددی کاربر برای رفع بن را ارسال کنید:", reply_markup=cancel_kb)
     elif data == "admin_banned_list":
         await send_banned_list(query)
 
 async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     state = admin_states.get(user_id)
+    if not state:
+        return
     text = update.message.text.strip()
     if state == "awaiting_ban_id":
         if not text.isdigit():
@@ -737,7 +813,6 @@ async def send_banned_list(target):
         else:
             await target.edit_message_text(full_text)
 
-# ========== اجرای هماهنگ ==========
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Initializing Playwright and Bot...")
@@ -778,6 +853,8 @@ async def lifespan(app: FastAPI):
     await application.initialize()
     await application.updater.start_polling(drop_pending_updates=True)
     await application.start()
+
+    asyncio.create_task(idle_session_cleaner(application.bot))
 
     print("--- Bot is fully Online! ---")
     yield

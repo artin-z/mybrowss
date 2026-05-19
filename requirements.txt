@@ -5,3 +5,4 @@ fastapi
 uvicorn
 imageio[ffmpeg]
 numpy
+av
